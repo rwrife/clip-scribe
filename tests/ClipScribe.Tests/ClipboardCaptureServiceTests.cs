@@ -63,6 +63,13 @@ public sealed class ClipboardCaptureServiceTests
         public Task<IReadOnlyList<ClipRecord>> GetRecentAsync(int take, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<ClipRecord>>(Array.Empty<ClipRecord>());
 
+        public Task<IReadOnlyList<ClipRecord>> SearchAsync(
+            string? query,
+            int take,
+            bool prioritizePinned = false,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<ClipRecord>>(Array.Empty<ClipRecord>());
+
         public Task<int> GetCountAsync(CancellationToken cancellationToken = default)
             => Task.FromResult(LastSaved is null ? 0 : 1);
     }
