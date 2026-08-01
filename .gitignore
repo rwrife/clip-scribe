@@ -1,0 +1,22 @@
+# Build artifacts
+bin/
+obj/
+
+# Test artifacts
+TestResults/
+*.trx
+*.coverage
+
+# User-specific files
+*.user
+*.suo
+.vs/
+
+# Local runtime data
+*.db
+*.db-wal
+*.db-shm
+
+# OS files
+.DS_Store
+Thumbs.db
