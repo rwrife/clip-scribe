@@ -2,7 +2,7 @@ using ClipScribe.Core.Abstractions;
 
 namespace ClipScribe.Core.Services;
 
-public sealed class ClipboardCaptureEngine : IDisposable
+public sealed class ClipboardCaptureEngine : IClipboardCaptureRuntime, IDisposable
 {
     private readonly IClipboardUpdateSource _clipboardUpdateSource;
     private readonly ClipboardCaptureService _captureService;

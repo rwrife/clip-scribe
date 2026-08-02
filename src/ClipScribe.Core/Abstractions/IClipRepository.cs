@@ -8,6 +8,8 @@ public interface IClipRepository
 
     Task<ClipSaveResult> SaveAsync(NewClip clip, CaptureOptions options, CancellationToken cancellationToken = default);
 
+    Task ClearAsync(CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<ClipRecord>> GetRecentAsync(int take, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<ClipRecord>> SearchAsync(

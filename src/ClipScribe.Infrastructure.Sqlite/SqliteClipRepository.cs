@@ -164,6 +164,18 @@ public sealed class SqliteClipRepository : IClipRepository
         return new ClipSaveResult(clipId, inserted);
     }
 
+    public async Task ClearAsync(CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        var cmd = connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM clips;";
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<IReadOnlyList<ClipRecord>> GetRecentAsync(int take, CancellationToken cancellationToken = default)
     {
         if (take <= 0)
