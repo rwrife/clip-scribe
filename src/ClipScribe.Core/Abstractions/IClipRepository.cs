@@ -10,5 +10,11 @@ public interface IClipRepository
 
     Task<IReadOnlyList<ClipRecord>> GetRecentAsync(int take, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<ClipRecord>> SearchAsync(
+        string? query,
+        int take,
+        bool prioritizePinned = false,
+        CancellationToken cancellationToken = default);
+
     Task<int> GetCountAsync(CancellationToken cancellationToken = default);
 }
