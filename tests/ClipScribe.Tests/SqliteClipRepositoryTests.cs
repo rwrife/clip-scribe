@@ -81,6 +81,22 @@ public sealed class SqliteClipRepositoryTests
     }
 
     [Fact]
+    public async Task ClearAsync_RemovesAllClips()
+    {
+        var dbPath = CreateDatabasePath();
+        var repo = new SqliteClipRepository(dbPath);
+        var options = new CaptureOptions(MaxHistoryItems: 100, Retention: null);
+
+        await repo.SaveAsync(MakeClip("one", DateTimeOffset.UtcNow), options);
+        await repo.SaveAsync(MakeClip("two", DateTimeOffset.UtcNow.AddSeconds(1)), options);
+
+        await repo.ClearAsync();
+
+        Assert.Equal(0, await repo.GetCountAsync());
+        Assert.Empty(await repo.GetRecentAsync(10));
+    }
+
+    [Fact]
     public async Task SearchAsync_ReturnsSubstringMatchesRanked()
     {
         var dbPath = CreateDatabasePath();
