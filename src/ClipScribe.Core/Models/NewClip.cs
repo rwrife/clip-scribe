@@ -6,4 +6,6 @@ public sealed record NewClip(
     ClipContentType ContentType,
     DateTimeOffset CreatedAtUtc,
     string? SourceApp,
-    bool IsPinned = false);
+    bool IsPinned = false,
+    bool IsSnippet = false,
+    string? SnippetName = null);

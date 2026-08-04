@@ -65,6 +65,25 @@ public sealed class SqliteClipRepositoryTests
     }
 
     [Fact]
+    public async Task SaveAsync_DoesNotPrunePinnedClips()
+    {
+        var dbPath = CreateDatabasePath();
+        var repo = new SqliteClipRepository(dbPath);
+
+        await repo.SaveAsync(MakeClip("pinned", DateTimeOffset.UtcNow.AddSeconds(1), isPinned: true), new CaptureOptions(MaxHistoryItems: 2, Retention: null));
+        await repo.SaveAsync(MakeClip("clip-1", DateTimeOffset.UtcNow.AddSeconds(2)), new CaptureOptions(MaxHistoryItems: 2, Retention: null));
+        await repo.SaveAsync(MakeClip("clip-2", DateTimeOffset.UtcNow.AddSeconds(3)), new CaptureOptions(MaxHistoryItems: 2, Retention: null));
+        await repo.SaveAsync(MakeClip("clip-3", DateTimeOffset.UtcNow.AddSeconds(4)), new CaptureOptions(MaxHistoryItems: 2, Retention: null));
+
+        var results = await repo.SearchAsync(null, take: 20, prioritizePinned: true);
+
+        Assert.Contains(results, x => x.Content == "pinned" && x.IsPinned);
+        Assert.DoesNotContain(results, x => x.Content == "clip-1");
+        Assert.Contains(results, x => x.Content == "clip-2");
+        Assert.Contains(results, x => x.Content == "clip-3");
+    }
+
+    [Fact]
     public async Task SaveAsync_PrunesByRetention()
     {
         var dbPath = CreateDatabasePath();
@@ -78,6 +97,52 @@ public sealed class SqliteClipRepositoryTests
 
         Assert.Single(rows);
         Assert.Equal("recent", rows[0].Content);
+    }
+
+    [Fact]
+    public async Task SnippetCrud_PersistsAndIsNeverPruned()
+    {
+        var dbPath = CreateDatabasePath();
+        var repo = new SqliteClipRepository(dbPath);
+
+        var snippetId = await repo.CreateSnippetAsync("Build command", "dotnet test");
+
+        await repo.SaveAsync(MakeClip("clip-1", DateTimeOffset.UtcNow.AddSeconds(1)), new CaptureOptions(MaxHistoryItems: 1, Retention: TimeSpan.FromMilliseconds(1)));
+        await Task.Delay(3);
+        await repo.SaveAsync(MakeClip("clip-2", DateTimeOffset.UtcNow.AddSeconds(2)), new CaptureOptions(MaxHistoryItems: 1, Retention: TimeSpan.FromMilliseconds(1)));
+
+        var rowsAfterPrune = await repo.SearchAsync(null, take: 20, prioritizePinned: true);
+        var snippet = Assert.Single(rowsAfterPrune.Where(x => x.Id == snippetId));
+        Assert.True(snippet.IsSnippet);
+        Assert.True(snippet.IsPinned);
+        Assert.Equal("Build command", snippet.SnippetName);
+
+        await repo.UpdateSnippetAsync(snippetId, "Updated command", "dotnet build");
+
+        var updated = Assert.Single((await repo.SearchAsync("Updated command", take: 20, prioritizePinned: true)).Where(x => x.Id == snippetId));
+        Assert.Equal("dotnet build", updated.Content);
+        Assert.Equal("Updated command", updated.SnippetName);
+
+        await repo.DeleteClipAsync(snippetId);
+        Assert.DoesNotContain(await repo.SearchAsync(null, take: 20, prioritizePinned: true), x => x.Id == snippetId);
+    }
+
+    [Fact]
+    public async Task SetPinnedAsync_TogglesPinStateForRegularClips()
+    {
+        var dbPath = CreateDatabasePath();
+        var repo = new SqliteClipRepository(dbPath);
+        var options = new CaptureOptions(MaxHistoryItems: 100, Retention: null);
+
+        var saved = await repo.SaveAsync(MakeClip("toggle-pin", DateTimeOffset.UtcNow), options);
+
+        await repo.SetPinnedAsync(saved.ClipId, isPinned: true);
+        var pinned = Assert.Single(await repo.SearchAsync("toggle-pin", take: 5, prioritizePinned: true));
+        Assert.True(pinned.IsPinned);
+
+        await repo.SetPinnedAsync(saved.ClipId, isPinned: false);
+        var unpinned = Assert.Single(await repo.SearchAsync("toggle-pin", take: 5, prioritizePinned: true));
+        Assert.False(unpinned.IsPinned);
     }
 
     [Fact]
