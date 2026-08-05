@@ -60,6 +60,18 @@ public sealed class ClipboardCaptureServiceTests
             return Task.FromResult(new ClipSaveResult(1, true));
         }
 
+        public Task<long> CreateSnippetAsync(string name, string content, CancellationToken cancellationToken = default)
+            => Task.FromResult(1L);
+
+        public Task UpdateSnippetAsync(long clipId, string name, string content, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task SetPinnedAsync(long clipId, bool isPinned, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task DeleteClipAsync(long clipId, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
         public Task ClearAsync(CancellationToken cancellationToken = default)
         {
             LastSaved = null;

@@ -1,5 +1,6 @@
 using ClipScribe.Core.Abstractions;
 using ClipScribe.Core.Models;
+using ClipScribe.Core.Utilities;
 using Microsoft.Data.Sqlite;
 
 namespace ClipScribe.Infrastructure.Sqlite;
@@ -60,6 +61,8 @@ public sealed class SqliteClipRepository : IClipRepository
                     created_at_utc INTEGER NOT NULL,
                     source_app TEXT NULL,
                     is_pinned INTEGER NOT NULL DEFAULT 0,
+                    is_snippet INTEGER NOT NULL DEFAULT 0,
+                    snippet_name TEXT NULL,
                     copy_count INTEGER NOT NULL DEFAULT 1
                 );
 
@@ -87,6 +90,8 @@ public sealed class SqliteClipRepository : IClipRepository
                 """;
 
             await ExecuteNonQueryAsync(connection, schema, cancellationToken);
+            await EnsureSchemaColumnAsync(connection, "is_snippet", "ALTER TABLE clips ADD COLUMN is_snippet INTEGER NOT NULL DEFAULT 0;", cancellationToken);
+            await EnsureSchemaColumnAsync(connection, "snippet_name", "ALTER TABLE clips ADD COLUMN snippet_name TEXT NULL;", cancellationToken);
             _initialized = true;
         }
         finally
@@ -116,7 +121,7 @@ public sealed class SqliteClipRepository : IClipRepository
         long clipId;
         bool inserted;
 
-        if (latest is not null && latest.Value.ContentHash == clip.ContentHash)
+        if (!clip.IsSnippet && latest is not null && !latest.Value.IsSnippet && latest.Value.ContentHash == clip.ContentHash)
         {
             clipId = latest.Value.Id;
             inserted = false;
@@ -143,8 +148,8 @@ public sealed class SqliteClipRepository : IClipRepository
             insert.Transaction = transaction;
             insert.CommandText =
                 """
-                INSERT INTO clips(content, content_hash, content_type, created_at_utc, source_app, is_pinned, copy_count)
-                VALUES ($content, $content_hash, $content_type, $created_at, $source_app, $is_pinned, 1);
+                INSERT INTO clips(content, content_hash, content_type, created_at_utc, source_app, is_pinned, is_snippet, snippet_name, copy_count)
+                VALUES ($content, $content_hash, $content_type, $created_at, $source_app, $is_pinned, $is_snippet, $snippet_name, 1);
                 SELECT last_insert_rowid();
                 """;
             insert.Parameters.AddWithValue("$content", clip.Content);
@@ -153,6 +158,8 @@ public sealed class SqliteClipRepository : IClipRepository
             insert.Parameters.AddWithValue("$created_at", timestamp);
             insert.Parameters.AddWithValue("$source_app", (object?)clip.SourceApp ?? DBNull.Value);
             insert.Parameters.AddWithValue("$is_pinned", clip.IsPinned ? 1 : 0);
+            insert.Parameters.AddWithValue("$is_snippet", clip.IsSnippet ? 1 : 0);
+            insert.Parameters.AddWithValue("$snippet_name", (object?)clip.SnippetName ?? DBNull.Value);
 
             clipId = (long)(await insert.ExecuteScalarAsync(cancellationToken)
                 ?? throw new InvalidOperationException("Failed to insert clip."));
@@ -162,6 +169,89 @@ public sealed class SqliteClipRepository : IClipRepository
         await transaction.CommitAsync(cancellationToken);
 
         return new ClipSaveResult(clipId, inserted);
+    }
+
+    public async Task<long> CreateSnippetAsync(string name, string content, CancellationToken cancellationToken = default)
+    {
+        var normalizedName = NormalizeSnippetName(name);
+        var normalizedContent = NormalizeSnippetContent(content);
+
+        var clip = new NewClip(
+            Content: normalizedContent,
+            ContentHash: TextHasher.Sha256(normalizedContent),
+            ContentType: ClipContentType.Text,
+            CreatedAtUtc: DateTimeOffset.UtcNow,
+            SourceApp: "snippet",
+            IsPinned: true,
+            IsSnippet: true,
+            SnippetName: normalizedName);
+
+        var result = await SaveAsync(clip, new CaptureOptions(MaxHistoryItems: int.MaxValue, Retention: null), cancellationToken);
+        return result.ClipId;
+    }
+
+    public async Task UpdateSnippetAsync(long clipId, string name, string content, CancellationToken cancellationToken = default)
+    {
+        var normalizedName = NormalizeSnippetName(name);
+        var normalizedContent = NormalizeSnippetContent(content);
+
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            """
+            UPDATE clips
+            SET content = $content,
+                content_hash = $hash,
+                snippet_name = $snippet_name,
+                source_app = 'snippet',
+                is_snippet = 1,
+                is_pinned = 1,
+                created_at_utc = $created_at,
+                copy_count = CASE WHEN copy_count < 1 THEN 1 ELSE copy_count END
+            WHERE id = $id;
+            """;
+        cmd.Parameters.AddWithValue("$content", normalizedContent);
+        cmd.Parameters.AddWithValue("$hash", TextHasher.Sha256(normalizedContent));
+        cmd.Parameters.AddWithValue("$snippet_name", normalizedName);
+        cmd.Parameters.AddWithValue("$created_at", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        cmd.Parameters.AddWithValue("$id", clipId);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task SetPinnedAsync(long clipId, bool isPinned, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            """
+            UPDATE clips
+            SET is_pinned = CASE WHEN is_snippet = 1 THEN 1 ELSE $is_pinned END
+            WHERE id = $id;
+            """;
+        cmd.Parameters.AddWithValue("$is_pinned", isPinned ? 1 : 0);
+        cmd.Parameters.AddWithValue("$id", clipId);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task DeleteClipAsync(long clipId, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        var cmd = connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM clips WHERE id = $id;";
+        cmd.Parameters.AddWithValue("$id", clipId);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task ClearAsync(CancellationToken cancellationToken = default)
@@ -223,14 +313,18 @@ public sealed class SqliteClipRepository : IClipRepository
         cmd.CommandText =
             string.IsNullOrWhiteSpace(ftsQuery)
                 ? """
-                  SELECT c.id, c.content, c.content_hash, c.content_type, c.created_at_utc, c.source_app, c.is_pinned, c.copy_count
+                  SELECT c.id, c.content, c.content_hash, c.content_type, c.created_at_utc, c.source_app, c.is_pinned, c.is_snippet, c.snippet_name, c.copy_count
                   FROM clips c
                   WHERE lower(c.content) LIKE $contains ESCAPE '\'
+                     OR lower(ifnull(c.snippet_name, '')) LIKE $contains ESCAPE '\'
                   ORDER BY
+                      c.is_snippet DESC,
                       CASE WHEN $prioritize_pinned = 1 THEN c.is_pinned ELSE 0 END DESC,
                       CASE
-                          WHEN lower(c.content) = $exact THEN 4
+                          WHEN lower(c.content) = $exact THEN 5
+                          WHEN lower(ifnull(c.snippet_name, '')) = $exact THEN 4
                           WHEN lower(c.content) LIKE $prefix ESCAPE '\' THEN 3
+                          WHEN lower(ifnull(c.snippet_name, '')) LIKE $prefix ESCAPE '\' THEN 2
                           ELSE 1
                       END DESC,
                       c.created_at_utc DESC,
@@ -244,18 +338,22 @@ public sealed class SqliteClipRepository : IClipRepository
                       JOIN clips c ON c.id = clips_fts.rowid
                       WHERE clips_fts MATCH $fts_query
                   )
-                  SELECT c.id, c.content, c.content_hash, c.content_type, c.created_at_utc, c.source_app, c.is_pinned, c.copy_count,
+                  SELECT c.id, c.content, c.content_hash, c.content_type, c.created_at_utc, c.source_app, c.is_pinned, c.is_snippet, c.snippet_name, c.copy_count,
                          fm.fts_rank
                   FROM clips c
                   LEFT JOIN fts_matches fm ON fm.id = c.id
                   WHERE fm.id IS NOT NULL
                      OR lower(c.content) LIKE $contains ESCAPE '\'
+                     OR lower(ifnull(c.snippet_name, '')) LIKE $contains ESCAPE '\'
                   ORDER BY
+                      c.is_snippet DESC,
                       CASE WHEN $prioritize_pinned = 1 THEN c.is_pinned ELSE 0 END DESC,
                       CASE
-                          WHEN lower(c.content) = $exact THEN 5
+                          WHEN lower(c.content) = $exact THEN 6
+                          WHEN lower(ifnull(c.snippet_name, '')) = $exact THEN 5
                           WHEN lower(c.content) LIKE $prefix ESCAPE '\' THEN 4
-                          WHEN fm.id IS NOT NULL THEN 3
+                          WHEN lower(ifnull(c.snippet_name, '')) LIKE $prefix ESCAPE '\' THEN 3
+                          WHEN fm.id IS NOT NULL THEN 2
                           ELSE 1
                       END DESC,
                       CASE WHEN fm.fts_rank IS NULL THEN 1 ELSE 0 END ASC,
@@ -293,7 +391,8 @@ public sealed class SqliteClipRepository : IClipRepository
                 .Where(x => !existingIds.Contains(x.Id))
                 .Select(x => new { Record = x, Score = ComputeFuzzyScore(loweredQuery, x.Content) })
                 .Where(x => x.Score >= 0.55)
-                .OrderByDescending(x => prioritizePinned && x.Record.IsPinned)
+                .OrderByDescending(x => x.Record.IsSnippet)
+                .ThenByDescending(x => prioritizePinned && x.Record.IsPinned)
                 .ThenByDescending(x => x.Score)
                 .ThenByDescending(x => x.Record.CreatedAtUtc)
                 .Take(take - results.Count)
@@ -330,7 +429,28 @@ public sealed class SqliteClipRepository : IClipRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<(long Id, string ContentHash)?> GetLatestClipMetadataAsync(
+    private static async Task EnsureSchemaColumnAsync(
+        SqliteConnection connection,
+        string columnName,
+        string alterSql,
+        CancellationToken cancellationToken)
+    {
+        var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA table_info(clips);";
+
+        await using var reader = await pragma.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        await ExecuteNonQueryAsync(connection, alterSql, cancellationToken);
+    }
+
+    private static async Task<(long Id, string ContentHash, bool IsSnippet)?> GetLatestClipMetadataAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         CancellationToken cancellationToken)
@@ -339,7 +459,7 @@ public sealed class SqliteClipRepository : IClipRepository
         cmd.Transaction = transaction;
         cmd.CommandText =
             """
-            SELECT id, content_hash
+            SELECT id, content_hash, is_snippet
             FROM clips
             ORDER BY created_at_utc DESC, id DESC
             LIMIT 1;
@@ -351,7 +471,7 @@ public sealed class SqliteClipRepository : IClipRepository
             return null;
         }
 
-        return (reader.GetInt64(0), reader.GetString(1));
+        return (reader.GetInt64(0), reader.GetString(1), reader.GetInt32(2) == 1);
     }
 
     private static async Task<IReadOnlyList<ClipRecord>> QueryRecentAsync(
@@ -363,9 +483,10 @@ public sealed class SqliteClipRepository : IClipRepository
         var cmd = connection.CreateCommand();
         cmd.CommandText =
             """
-            SELECT id, content, content_hash, content_type, created_at_utc, source_app, is_pinned, copy_count
+            SELECT id, content, content_hash, content_type, created_at_utc, source_app, is_pinned, is_snippet, snippet_name, copy_count
             FROM clips
             ORDER BY
+                is_snippet DESC,
                 CASE WHEN $prioritize_pinned = 1 THEN is_pinned ELSE 0 END DESC,
                 created_at_utc DESC,
                 id DESC
@@ -393,7 +514,9 @@ public sealed class SqliteClipRepository : IClipRepository
             CreatedAtUtc: DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(4)),
             SourceApp: reader.IsDBNull(5) ? null : reader.GetString(5),
             IsPinned: reader.GetInt32(6) == 1,
-            CopyCount: reader.GetInt32(7));
+            IsSnippet: reader.GetInt32(7) == 1,
+            SnippetName: reader.IsDBNull(8) ? null : reader.GetString(8),
+            CopyCount: reader.GetInt32(9));
 
     private static string EscapeLike(string value)
         => value
@@ -466,6 +589,30 @@ public sealed class SqliteClipRepository : IClipRepository
         return (coverage * 0.7) + (contiguousBonus * 0.3);
     }
 
+    private static string NormalizeSnippetName(string value)
+    {
+        var normalized = value.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new ArgumentException("Snippet name is required.", nameof(value));
+        }
+
+        return normalized.Length <= 120
+            ? normalized
+            : normalized[..120];
+    }
+
+    private static string NormalizeSnippetContent(string value)
+    {
+        var normalized = value.Replace("\0", string.Empty, StringComparison.Ordinal).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new ArgumentException("Snippet content is required.", nameof(value));
+        }
+
+        return normalized;
+    }
+
     private static async Task ApplyPruningAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -477,7 +624,7 @@ public sealed class SqliteClipRepository : IClipRepository
             var retentionCutoff = DateTimeOffset.UtcNow.Subtract(retention).ToUnixTimeMilliseconds();
             var retentionDelete = connection.CreateCommand();
             retentionDelete.Transaction = transaction;
-            retentionDelete.CommandText = "DELETE FROM clips WHERE created_at_utc < $cutoff;";
+            retentionDelete.CommandText = "DELETE FROM clips WHERE is_pinned = 0 AND is_snippet = 0 AND created_at_utc < $cutoff;";
             retentionDelete.Parameters.AddWithValue("$cutoff", retentionCutoff);
             await retentionDelete.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -489,6 +636,7 @@ public sealed class SqliteClipRepository : IClipRepository
             DELETE FROM clips
             WHERE id IN (
                 SELECT id FROM clips
+                WHERE is_pinned = 0 AND is_snippet = 0
                 ORDER BY created_at_utc DESC, id DESC
                 LIMIT -1 OFFSET $max_history
             );

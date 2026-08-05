@@ -8,4 +8,6 @@ public sealed record ClipRecord(
     DateTimeOffset CreatedAtUtc,
     string? SourceApp,
     bool IsPinned,
+    bool IsSnippet,
+    string? SnippetName,
     int CopyCount);
