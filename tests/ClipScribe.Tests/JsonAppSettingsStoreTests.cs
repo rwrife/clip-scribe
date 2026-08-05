@@ -66,7 +66,90 @@ public sealed class JsonAppSettingsStoreTests
     }
 
     [Fact]
-    public void EnsureExists_WritesDefaultConfig_AndLoadHotkeyReturnsDefault()
+    public void ParseLocalAiSettings_ReturnsDefault_WhenJsonIsMissingOrInvalid()
+    {
+        var fromEmpty = JsonAppSettingsStore.ParseLocalAiSettings(null);
+        var fromInvalid = JsonAppSettingsStore.ParseLocalAiSettings("{ definitely-not-json }");
+
+        Assert.Equal(LocalAiSettings.Default, fromEmpty);
+        Assert.Equal(LocalAiSettings.Default, fromInvalid);
+    }
+
+    [Fact]
+    public void ParseLocalAiSettings_NormalizesConfiguredValues()
+    {
+        var json =
+            """
+            {
+              "localAi": {
+                "enabled": true,
+                "endpoint": "  http://localhost:11434/v1  ",
+                "model": "  llama3.2:3b  "
+              }
+            }
+            """;
+
+        var settings = JsonAppSettingsStore.ParseLocalAiSettings(json);
+
+        Assert.True(settings.Enabled);
+        Assert.Equal("http://localhost:11434/v1", settings.Endpoint);
+        Assert.Equal("llama3.2:3b", settings.Model);
+        Assert.True(settings.IsEnabledAndConfigured);
+    }
+
+    [Fact]
+    public void SaveHotkey_PreservesExistingLocalAiSettings()
+    {
+        var tempDirectory = Path.Combine(Path.GetTempPath(), "clip-scribe-tests", Guid.NewGuid().ToString("N"));
+        var settingsPath = Path.Combine(tempDirectory, "config.json");
+
+        Directory.CreateDirectory(tempDirectory);
+        File.WriteAllText(
+            settingsPath,
+            """
+            {
+              "hotkey": {
+                "ctrl": true,
+                "shift": true,
+                "alt": false,
+                "win": false,
+                "key": "v"
+              },
+              "localAi": {
+                "enabled": true,
+                "endpoint": "http://localhost:11434",
+                "model": "llama3.2:3b"
+              }
+            }
+            """);
+
+        try
+        {
+            var store = new JsonAppSettingsStore(settingsPath);
+            store.SaveHotkey(new GlobalHotkeySettings(Ctrl: true, Shift: false, Alt: true, Win: false, Key: "f12"));
+
+            var localAi = store.LoadLocalAiSettings();
+            Assert.True(localAi.Enabled);
+            Assert.Equal("http://localhost:11434", localAi.Endpoint);
+            Assert.Equal("llama3.2:3b", localAi.Model);
+
+            var hotkey = store.LoadHotkey();
+            Assert.True(hotkey.Ctrl);
+            Assert.False(hotkey.Shift);
+            Assert.True(hotkey.Alt);
+            Assert.Equal("F12", hotkey.Key);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDirectory))
+            {
+                Directory.Delete(tempDirectory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void EnsureExists_WritesDefaultConfig_WithHotkeyAndLocalAiDefaults()
     {
         var tempDirectory = Path.Combine(Path.GetTempPath(), "clip-scribe-tests", Guid.NewGuid().ToString("N"));
         var settingsPath = Path.Combine(tempDirectory, "config.json");
@@ -77,9 +160,8 @@ public sealed class JsonAppSettingsStoreTests
             store.EnsureExists();
 
             Assert.True(File.Exists(settingsPath));
-
-            var hotkey = store.LoadHotkey();
-            Assert.Equal(GlobalHotkeySettings.Default, hotkey);
+            Assert.Equal(GlobalHotkeySettings.Default, store.LoadHotkey());
+            Assert.Equal(LocalAiSettings.Default, store.LoadLocalAiSettings());
         }
         finally
         {

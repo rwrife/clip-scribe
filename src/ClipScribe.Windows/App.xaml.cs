@@ -32,8 +32,10 @@ public partial class App : Wpf.Application
     private Win32GlobalHotkeyHost? _hotkeyHost;
     private Win32ForegroundWindowHandleProvider? _foregroundWindowHandleProvider;
     private Win32PasteBackService? _pasteBackService;
+    private LocalAiTextTransformClient? _localAiTransformClient;
 
     private GlobalHotkeySettings _activeHotkey = GlobalHotkeySettings.Default;
+    private LocalAiSettings _activeLocalAiSettings = LocalAiSettings.Default;
     private bool _hotkeyRegistered;
 
     public App()
@@ -79,9 +81,11 @@ public partial class App : Wpf.Application
         {
             _settingsStore = new JsonAppSettingsStore(_settingsPath);
             _settingsStore.EnsureExists();
+            _activeLocalAiSettings = _settingsStore.LoadLocalAiSettings();
 
             _foregroundWindowHandleProvider = new Win32ForegroundWindowHandleProvider();
             _pasteBackService = new Win32PasteBackService();
+            _localAiTransformClient = new LocalAiTextTransformClient();
 
             _hotkeyHost = new Win32GlobalHotkeyHost(HandleHistoryHotkeyPressed);
             TryApplyHotkey(_settingsStore.LoadHotkey(), showErrorDialog: true);
@@ -141,11 +145,11 @@ public partial class App : Wpf.Application
                 return;
             }
 
-            ReloadHotkeyFromSettings();
+            ReloadSettingsFromFile();
         });
     }
 
-    private void ReloadHotkeyFromSettings()
+    private void ReloadSettingsFromFile()
     {
         if (_settingsStore is null)
         {
@@ -153,6 +157,9 @@ public partial class App : Wpf.Application
         }
 
         TryApplyHotkey(_settingsStore.LoadHotkey(), showErrorDialog: false);
+
+        _activeLocalAiSettings = _settingsStore.LoadLocalAiSettings();
+        _historyWindow?.SetLocalAiSettings(_activeLocalAiSettings);
     }
 
     private void TryApplyHotkey(GlobalHotkeySettings settings, bool showErrorDialog)
@@ -246,9 +253,11 @@ public partial class App : Wpf.Application
 
         if (_historyWindow is null)
         {
-            _historyWindow = new HistoryWindow(_repository, _pasteBackService);
+            _historyWindow = new HistoryWindow(_repository, _pasteBackService, _localAiTransformClient, _activeLocalAiSettings);
             _historyWindow.Closed += (_, _) => _historyWindow = null;
         }
+
+        _historyWindow.SetLocalAiSettings(_activeLocalAiSettings);
 
         if (capturePasteTarget)
         {
@@ -305,6 +314,7 @@ public partial class App : Wpf.Application
         _trayIconHost?.Dispose();
         _captureController?.Dispose();
         _captureEngine?.Dispose();
+        _localAiTransformClient?.Dispose();
 
         base.OnExit(e);
     }

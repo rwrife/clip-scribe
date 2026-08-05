@@ -1,3 +1,4 @@
+using System.Net.Http;
 using ClipScribe.Core.Abstractions;
 using ClipScribe.Core.Models;
 using Controls = System.Windows.Controls;
@@ -10,6 +11,7 @@ public sealed class HistoryWindow : Wpf.Window
 {
     private readonly IClipRepository _repository;
     private readonly Win32PasteBackService? _pasteBackService;
+    private readonly ILocalAiTextTransformClient? _localAiTransformClient;
 
     private readonly Controls.TextBox _searchBox;
     private readonly Controls.ListBox _listBox;
@@ -17,6 +19,7 @@ public sealed class HistoryWindow : Wpf.Window
 
     private readonly Controls.MenuItem _pasteMenuItem;
     private readonly Controls.MenuItem _pastePlainMenuItem;
+    private readonly Controls.MenuItem _transformMenuItem;
     private readonly Controls.MenuItem _togglePinMenuItem;
     private readonly Controls.MenuItem _toggleQueueMenuItem;
     private readonly Controls.MenuItem _pasteQueuedMenuItem;
@@ -26,14 +29,24 @@ public sealed class HistoryWindow : Wpf.Window
     private readonly Controls.MenuItem _deleteClipMenuItem;
 
     private readonly List<long> _queuedClipIds = new();
+    private readonly Dictionary<long, string> _transformedContentByClipId = new();
+
+    private LocalAiSettings _localAiSettings;
+    private bool _localAiTemporarilyUnavailable;
 
     private IntPtr _pasteTargetWindow = IntPtr.Zero;
     private List<ClipRow> _currentRows = new();
 
-    public HistoryWindow(IClipRepository repository, Win32PasteBackService? pasteBackService)
+    public HistoryWindow(
+        IClipRepository repository,
+        Win32PasteBackService? pasteBackService,
+        ILocalAiTextTransformClient? localAiTransformClient,
+        LocalAiSettings localAiSettings)
     {
         _repository = repository;
         _pasteBackService = pasteBackService;
+        _localAiTransformClient = localAiTransformClient;
+        _localAiSettings = LocalAiSettings.Normalize(localAiSettings);
 
         Title = "clip-scribe history";
         Width = 980;
@@ -74,6 +87,7 @@ public sealed class HistoryWindow : Wpf.Window
         {
             await _repository.ClearAsync();
             _queuedClipIds.Clear();
+            _transformedContentByClipId.Clear();
             await RefreshAsync();
         };
 
@@ -129,6 +143,14 @@ public sealed class HistoryWindow : Wpf.Window
         _pastePlainMenuItem = new Controls.MenuItem { Header = "Paste as plain text" };
         _pastePlainMenuItem.Click += async (_, _) => await PasteSelectedClipAsync(forcePlainText: true);
 
+        _transformMenuItem = new Controls.MenuItem { Header = "Transform" };
+        foreach (var preset in TransformPreset.Defaults)
+        {
+            var presetItem = new Controls.MenuItem { Header = preset.Name };
+            presetItem.Click += async (_, _) => await TransformSelectedClipAsync(preset);
+            _transformMenuItem.Items.Add(presetItem);
+        }
+
         _togglePinMenuItem = new Controls.MenuItem { Header = "Pin" };
         _togglePinMenuItem.Click += async (_, _) => await TogglePinForSelectedAsync();
 
@@ -152,6 +174,7 @@ public sealed class HistoryWindow : Wpf.Window
 
         menu.Items.Add(_pasteMenuItem);
         menu.Items.Add(_pastePlainMenuItem);
+        menu.Items.Add(_transformMenuItem);
         menu.Items.Add(new Controls.Separator());
         menu.Items.Add(_togglePinMenuItem);
         menu.Items.Add(_toggleQueueMenuItem);
@@ -192,6 +215,13 @@ public sealed class HistoryWindow : Wpf.Window
         _searchBox.SelectAll();
     }
 
+    public void SetLocalAiSettings(LocalAiSettings settings)
+    {
+        _localAiSettings = LocalAiSettings.Normalize(settings);
+        _localAiTemporarilyUnavailable = false;
+        RefreshContextMenuState();
+    }
+
     public async Task RefreshAsync()
     {
         await RefreshAsync(_searchBox.Text);
@@ -206,14 +236,30 @@ public sealed class HistoryWindow : Wpf.Window
 
         _queuedClipIds.RemoveAll(id => !byId.ContainsKey(id));
 
+        foreach (var clipId in _transformedContentByClipId.Keys.ToList())
+        {
+            if (!byId.ContainsKey(clipId))
+            {
+                _transformedContentByClipId.Remove(clipId);
+            }
+        }
+
         var queueOrderById = _queuedClipIds
             .Select((id, idx) => new { id, order = idx + 1 })
             .ToDictionary(x => x.id, x => x.order);
 
         _currentRows = clips
-            .Select(record => ClipRow.FromRecord(
-                record,
-                queueOrderById.TryGetValue(record.Id, out var order) ? order : null))
+            .Select(record =>
+            {
+                var effectiveContent = _transformedContentByClipId.TryGetValue(record.Id, out var transformed)
+                    ? transformed
+                    : record.Content;
+
+                return ClipRow.FromRecord(
+                    record,
+                    effectiveContent,
+                    queueOrderById.TryGetValue(record.Id, out var order) ? order : null);
+            })
             .ToList();
 
         _listBox.ItemsSource = _currentRows;
@@ -344,6 +390,75 @@ public sealed class HistoryWindow : Wpf.Window
         await PasteContentsAsync(new[] { row.Content }, forcePlainText);
     }
 
+    private async Task TransformSelectedClipAsync(TransformPreset preset)
+    {
+        if (_listBox.SelectedItem is not ClipRow row)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(row.Content)
+            || _localAiTransformClient is null
+            || !_localAiSettings.IsEnabledAndConfigured)
+        {
+            return;
+        }
+
+        try
+        {
+            var transformed = await _localAiTransformClient.TransformAsync(
+                _localAiSettings,
+                preset.Instruction,
+                row.Content);
+
+            var choice = ShowTransformChoiceDialog(preset.Name, transformed);
+            if (choice == TransformApplyChoice.Cancel)
+            {
+                return;
+            }
+
+            var updated = choice == TransformApplyChoice.Replace
+                ? transformed
+                : string.Concat(row.Content, Environment.NewLine, Environment.NewLine, transformed);
+
+            _transformedContentByClipId[row.Id] = NormalizePlainText(updated);
+            await RefreshAsync(_searchBox.Text);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            _localAiTemporarilyUnavailable = true;
+            RefreshContextMenuState();
+
+            Wpf.MessageBox.Show(
+                this,
+                $"AI transform failed: {ex.Message}",
+                "clip-scribe",
+                Wpf.MessageBoxButton.OK,
+                Wpf.MessageBoxImage.Warning);
+        }
+    }
+
+    private TransformApplyChoice ShowTransformChoiceDialog(string presetName, string transformedText)
+    {
+        var preview = transformedText.Length <= 1600
+            ? transformedText
+            : string.Concat(transformedText.AsSpan(0, 1599), "…");
+
+        var result = Wpf.MessageBox.Show(
+            this,
+            $"{presetName} output:\n\n{preview}\n\nYes = replace selected preview\nNo = append to selected preview\nCancel = discard",
+            "clip-scribe",
+            Wpf.MessageBoxButton.YesNoCancel,
+            Wpf.MessageBoxImage.Question);
+
+        return result switch
+        {
+            Wpf.MessageBoxResult.Yes => TransformApplyChoice.Replace,
+            Wpf.MessageBoxResult.No => TransformApplyChoice.Append,
+            _ => TransformApplyChoice.Cancel
+        };
+    }
+
     private async Task TogglePinForSelectedAsync()
     {
         if (_listBox.SelectedItem is not ClipRow row)
@@ -438,6 +553,7 @@ public sealed class HistoryWindow : Wpf.Window
         }
 
         await _repository.UpdateSnippetAsync(row.Id, input.Value.Name, input.Value.Content);
+        _transformedContentByClipId.Remove(row.Id);
         await RefreshAsync(_searchBox.Text);
     }
 
@@ -450,6 +566,7 @@ public sealed class HistoryWindow : Wpf.Window
 
         await _repository.DeleteClipAsync(row.Id);
         _queuedClipIds.Remove(row.Id);
+        _transformedContentByClipId.Remove(row.Id);
         await RefreshAsync(_searchBox.Text);
     }
 
@@ -462,6 +579,7 @@ public sealed class HistoryWindow : Wpf.Window
 
         await _repository.DeleteClipAsync(row.Id);
         _queuedClipIds.Remove(row.Id);
+        _transformedContentByClipId.Remove(row.Id);
         await RefreshAsync(_searchBox.Text);
     }
 
@@ -519,6 +637,13 @@ public sealed class HistoryWindow : Wpf.Window
 
         _pasteMenuItem.IsEnabled = hasSelection;
         _pastePlainMenuItem.IsEnabled = hasSelection;
+
+        var canUseLocalAi = _localAiTransformClient is not null && _localAiSettings.IsEnabledAndConfigured;
+        _transformMenuItem.Visibility = canUseLocalAi ? Wpf.Visibility.Visible : Wpf.Visibility.Collapsed;
+        _transformMenuItem.IsEnabled = canUseLocalAi && !_localAiTemporarilyUnavailable && hasSelection && !string.IsNullOrWhiteSpace(row?.Content);
+        _transformMenuItem.Header = _localAiTemporarilyUnavailable
+            ? "Transform (endpoint unavailable)"
+            : "Transform";
 
         _togglePinMenuItem.IsEnabled = hasSelection && row is { IsSnippet: false };
         _togglePinMenuItem.Header = row is null
@@ -680,34 +805,60 @@ public sealed class HistoryWindow : Wpf.Window
 
     private readonly record struct SnippetInput(string Name, string Content);
 
+    private enum TransformApplyChoice
+    {
+        Replace,
+        Append,
+        Cancel
+    }
+
+    private sealed record TransformPreset(string Name, string Instruction)
+    {
+        public static IReadOnlyList<TransformPreset> Defaults { get; } =
+        [
+            new("Fix grammar", "Fix grammar and spelling while preserving meaning."),
+            new("Summarize", "Summarize this text in concise bullet points."),
+            new("Make polite", "Rewrite this text to sound more polite and professional."),
+            new("Make formal", "Rewrite this text in a formal tone."),
+            new("Make casual", "Rewrite this text in a casual, friendly tone."),
+            new("To Markdown", "Convert this text into clean Markdown."),
+            new("Extract action items", "Extract explicit action items as a bulleted list with owners when present."),
+            new("Translate", "Translate this text to English while preserving meaning and formatting where possible.")
+        ];
+    }
+
     private sealed record ClipRow(
         long Id,
         string Content,
         bool IsPinned,
         bool IsSnippet,
         string? SnippetName,
+        bool IsTransformed,
         int? QueueOrder,
         string DisplayText)
     {
-        public static ClipRow FromRecord(ClipRecord record, int? queueOrder)
+        public static ClipRow FromRecord(ClipRecord record, string content, int? queueOrder)
         {
             var source = string.IsNullOrWhiteSpace(record.SourceApp) ? "unknown" : record.SourceApp;
-            var contentPreview = Abbreviate(record.Content, 160);
+            var contentPreview = Abbreviate(content, 160);
+            var isTransformed = !string.Equals(content, record.Content, StringComparison.Ordinal);
 
             var badge = record.IsSnippet
                 ? $"[SNIPPET:{record.SnippetName ?? "unnamed"}]"
                 : record.IsPinned ? "[PIN]" : "[CLIP]";
 
             var queue = queueOrder is int order ? $"[{order}] " : string.Empty;
+            var transformBadge = isTransformed ? "[AI] " : string.Empty;
 
-            var display = $"{queue}{badge} [{record.CreatedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}] {source} · {contentPreview}";
+            var display = $"{queue}{transformBadge}{badge} [{record.CreatedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}] {source} · {contentPreview}";
 
             return new ClipRow(
                 Id: record.Id,
-                Content: record.Content,
+                Content: content,
                 IsPinned: record.IsPinned,
                 IsSnippet: record.IsSnippet,
                 SnippetName: record.SnippetName,
+                IsTransformed: isTransformed,
                 QueueOrder: queueOrder,
                 DisplayText: display);
         }
