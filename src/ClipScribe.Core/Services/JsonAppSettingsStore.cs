@@ -33,35 +33,87 @@ public sealed class JsonAppSettingsStore
             return;
         }
 
-        SaveHotkey(GlobalHotkeySettings.Default);
+        WriteSettingsDocument(new SettingsDocument
+        {
+            Hotkey = GlobalHotkeySettings.Default,
+            LocalAi = LocalAiSettings.Default
+        });
     }
 
     public GlobalHotkeySettings LoadHotkey()
     {
+        var doc = ReadSettingsDocument();
+        return GlobalHotkeySettings.Normalize(doc?.Hotkey);
+    }
+
+    public LocalAiSettings LoadLocalAiSettings()
+    {
+        var doc = ReadSettingsDocument();
+        return LocalAiSettings.Normalize(doc?.LocalAi);
+    }
+
+    public void SaveHotkey(GlobalHotkeySettings hotkey)
+    {
+        var existing = ReadSettingsDocument();
+
+        var payload = new SettingsDocument
+        {
+            Hotkey = GlobalHotkeySettings.Normalize(hotkey),
+            LocalAi = LocalAiSettings.Normalize(existing?.LocalAi)
+        };
+
+        WriteSettingsDocument(payload);
+    }
+
+    public static GlobalHotkeySettings ParseHotkey(string? json)
+    {
+        var payload = ParseSettingsDocument(json);
+        return GlobalHotkeySettings.Normalize(payload?.Hotkey);
+    }
+
+    public static LocalAiSettings ParseLocalAiSettings(string? json)
+    {
+        var payload = ParseSettingsDocument(json);
+        return LocalAiSettings.Normalize(payload?.LocalAi);
+    }
+
+    private SettingsDocument? ReadSettingsDocument()
+    {
         if (!File.Exists(_settingsPath))
         {
-            return GlobalHotkeySettings.Default;
+            return null;
         }
 
         try
         {
             var json = File.ReadAllText(_settingsPath);
-            return ParseHotkey(json);
+            return ParseSettingsDocument(json);
         }
         catch
         {
-            return GlobalHotkeySettings.Default;
+            return null;
         }
     }
 
-    public void SaveHotkey(GlobalHotkeySettings hotkey)
+    private static SettingsDocument? ParseSettingsDocument(string? json)
     {
-        var normalized = GlobalHotkeySettings.Normalize(hotkey);
-        var payload = new SettingsDocument
+        if (string.IsNullOrWhiteSpace(json))
         {
-            Hotkey = normalized
-        };
+            return null;
+        }
 
+        try
+        {
+            return JsonSerializer.Deserialize<SettingsDocument>(json, ReadOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private void WriteSettingsDocument(SettingsDocument payload)
+    {
         var parent = Path.GetDirectoryName(_settingsPath);
         if (!string.IsNullOrWhiteSpace(parent))
         {
@@ -72,26 +124,10 @@ public sealed class JsonAppSettingsStore
         File.WriteAllText(_settingsPath, json);
     }
 
-    public static GlobalHotkeySettings ParseHotkey(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return GlobalHotkeySettings.Default;
-        }
-
-        try
-        {
-            var payload = JsonSerializer.Deserialize<SettingsDocument>(json, ReadOptions);
-            return GlobalHotkeySettings.Normalize(payload?.Hotkey);
-        }
-        catch (JsonException)
-        {
-            return GlobalHotkeySettings.Default;
-        }
-    }
-
     private sealed class SettingsDocument
     {
         public GlobalHotkeySettings? Hotkey { get; init; }
+
+        public LocalAiSettings? LocalAi { get; init; }
     }
 }
