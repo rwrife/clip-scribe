@@ -36,7 +36,8 @@ public sealed class JsonAppSettingsStore
         WriteSettingsDocument(new SettingsDocument
         {
             Hotkey = GlobalHotkeySettings.Default,
-            LocalAi = LocalAiSettings.Default
+            LocalAi = LocalAiSettings.Default,
+            Privacy = PrivacySettings.Default
         });
     }
 
@@ -52,6 +53,12 @@ public sealed class JsonAppSettingsStore
         return LocalAiSettings.Normalize(doc?.LocalAi);
     }
 
+    public PrivacySettings LoadPrivacySettings()
+    {
+        var doc = ReadSettingsDocument();
+        return PrivacySettings.Normalize(doc?.Privacy);
+    }
+
     public void SaveHotkey(GlobalHotkeySettings hotkey)
     {
         var existing = ReadSettingsDocument();
@@ -59,7 +66,8 @@ public sealed class JsonAppSettingsStore
         var payload = new SettingsDocument
         {
             Hotkey = GlobalHotkeySettings.Normalize(hotkey),
-            LocalAi = LocalAiSettings.Normalize(existing?.LocalAi)
+            LocalAi = LocalAiSettings.Normalize(existing?.LocalAi),
+            Privacy = PrivacySettings.Normalize(existing?.Privacy)
         };
 
         WriteSettingsDocument(payload);
@@ -75,6 +83,12 @@ public sealed class JsonAppSettingsStore
     {
         var payload = ParseSettingsDocument(json);
         return LocalAiSettings.Normalize(payload?.LocalAi);
+    }
+
+    public static PrivacySettings ParsePrivacySettings(string? json)
+    {
+        var payload = ParseSettingsDocument(json);
+        return PrivacySettings.Normalize(payload?.Privacy);
     }
 
     private SettingsDocument? ReadSettingsDocument()
@@ -129,5 +143,7 @@ public sealed class JsonAppSettingsStore
         public GlobalHotkeySettings? Hotkey { get; init; }
 
         public LocalAiSettings? LocalAi { get; init; }
+
+        public PrivacySettings? Privacy { get; init; }
     }
 }

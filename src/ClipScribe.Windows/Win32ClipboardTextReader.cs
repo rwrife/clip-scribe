@@ -8,6 +8,13 @@ public sealed class Win32ClipboardTextReader : IClipboardTextReader
 {
     private const uint CfUnicodeText = 13;
 
+    private static readonly string[] ClipboardIgnoreFormatNames =
+    [
+        "CF_CLIPBOARD_VIEWER_IGNORE",
+        "Clipboard Viewer Ignore",
+        "ExcludeClipboardContentFromMonitorProcessing"
+    ];
+
     public bool TryReadText(out string? text)
     {
         text = null;
@@ -60,6 +67,25 @@ public sealed class Win32ClipboardTextReader : IClipboardTextReader
         }
     }
 
+    public bool ShouldIgnoreCurrentClipboard()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        foreach (var formatName in ClipboardIgnoreFormatNames)
+        {
+            var format = RegisterClipboardFormat(formatName);
+            if (format != 0 && IsClipboardFormatAvailable(format))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool OpenClipboard(IntPtr hWndNewOwner);
 
@@ -71,6 +97,9 @@ public sealed class Win32ClipboardTextReader : IClipboardTextReader
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool IsClipboardFormatAvailable(uint format);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint RegisterClipboardFormat(string lpszFormat);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GlobalLock(IntPtr hMem);
