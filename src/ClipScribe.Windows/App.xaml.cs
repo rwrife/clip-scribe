@@ -18,6 +18,7 @@ public partial class App : Wpf.Application
         AppName);
 
     private readonly string _settingsPath;
+    private readonly string _onboardingStatePath;
 
     private IClipRepository? _repository;
     private ClipboardCaptureEngine? _captureEngine;
@@ -36,11 +37,13 @@ public partial class App : Wpf.Application
 
     private GlobalHotkeySettings _activeHotkey = GlobalHotkeySettings.Default;
     private LocalAiSettings _activeLocalAiSettings = LocalAiSettings.Default;
+    private PrivacySettings _activePrivacySettings = PrivacySettings.Default;
     private bool _hotkeyRegistered;
 
     public App()
     {
         _settingsPath = Path.Combine(_dataDirectory, "config.json");
+        _onboardingStatePath = Path.Combine(_dataDirectory, "onboarding.dismissed");
     }
 
     protected override async void OnStartup(Wpf.StartupEventArgs e)
@@ -52,11 +55,20 @@ public partial class App : Wpf.Application
 
         _repository = new SqliteClipRepository(Path.Combine(_dataDirectory, "history.db"));
 
+        if (OperatingSystem.IsWindows())
+        {
+            _settingsStore = new JsonAppSettingsStore(_settingsPath);
+            _settingsStore.EnsureExists();
+            _activeLocalAiSettings = _settingsStore.LoadLocalAiSettings();
+            _activePrivacySettings = _settingsStore.LoadPrivacySettings();
+        }
+
         var captureService = new ClipboardCaptureService(
             _repository,
             new Win32ClipboardTextReader(),
             new Win32ForegroundWindowInfoProvider(),
-            new CaptureOptions());
+            new CaptureOptions(),
+            () => _activePrivacySettings);
 
         _captureEngine = new ClipboardCaptureEngine(
             new Win32ClipboardUpdateSource(),
@@ -79,16 +91,12 @@ public partial class App : Wpf.Application
 
         if (OperatingSystem.IsWindows())
         {
-            _settingsStore = new JsonAppSettingsStore(_settingsPath);
-            _settingsStore.EnsureExists();
-            _activeLocalAiSettings = _settingsStore.LoadLocalAiSettings();
-
             _foregroundWindowHandleProvider = new Win32ForegroundWindowHandleProvider();
             _pasteBackService = new Win32PasteBackService();
             _localAiTransformClient = new LocalAiTextTransformClient();
 
             _hotkeyHost = new Win32GlobalHotkeyHost(HandleHistoryHotkeyPressed);
-            TryApplyHotkey(_settingsStore.LoadHotkey(), showErrorDialog: true);
+            TryApplyHotkey(_settingsStore!.LoadHotkey(), showErrorDialog: true);
             StartSettingsWatcher();
         }
 
@@ -100,6 +108,8 @@ public partial class App : Wpf.Application
             openHistoryAsync: OpenHistoryFromTrayAsync,
             openSettings: OpenSettings,
             quit: QuitApplication);
+
+        MaybeShowFirstRunOnboarding();
     }
 
     private void StartSettingsWatcher()
@@ -159,7 +169,35 @@ public partial class App : Wpf.Application
         TryApplyHotkey(_settingsStore.LoadHotkey(), showErrorDialog: false);
 
         _activeLocalAiSettings = _settingsStore.LoadLocalAiSettings();
+        _activePrivacySettings = _settingsStore.LoadPrivacySettings();
         _historyWindow?.SetLocalAiSettings(_activeLocalAiSettings);
+    }
+
+    private void MaybeShowFirstRunOnboarding()
+    {
+        if (!OperatingSystem.IsWindows() || File.Exists(_onboardingStatePath))
+        {
+            return;
+        }
+
+        try
+        {
+            Wpf.MessageBox.Show(
+                "Welcome to clip-scribe!\n\n" +
+                "• Open history with Ctrl+Shift+V\n" +
+                "• Right-click clips for pinning, snippets, plain-text paste, and local-AI transforms\n" +
+                "• Privacy defaults are enabled: clipboard ignore flags are respected and sensitive-looking content is skipped\n\n" +
+                "You can edit %LOCALAPPDATA%\\clip-scribe\\config.json to change hotkey/local-AI/privacy settings.",
+                AppName,
+                Wpf.MessageBoxButton.OK,
+                Wpf.MessageBoxImage.Information);
+
+            File.WriteAllText(_onboardingStatePath, "dismissed");
+        }
+        catch
+        {
+            // Best effort only; onboarding should never block startup.
+        }
     }
 
     private void TryApplyHotkey(GlobalHotkeySettings settings, bool showErrorDialog)
